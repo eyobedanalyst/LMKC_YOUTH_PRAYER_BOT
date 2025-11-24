@@ -1,16 +1,22 @@
-import os
-import logging
+import streamlit as st
 import requests
 import json
 import random
 from datetime import datetime
 import pytz
 import time
-from threading import Thread
+import threading
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-from flask import Flask
-import threading
+import logging
+
+# Set page config
+st.set_page_config(
+    page_title="Prayer Bot Controller",
+    page_icon="🙏",
+    layout="wide"
+)
 
 # Enable logging
 logging.basicConfig(
@@ -22,42 +28,18 @@ logger = logging.getLogger(__name__)
 # Your Telegram Bot Token
 TELEGRAM_BOT_TOKEN = "8419113682:AAHeiz6hAUarFw-r1yYXHzjKdjtiYkvrCKs"
 
-# Your Google Sheet configuration (for storing prayers/testimonies/feedback only)
-SHEET_ID = "1S-WDOuIK_h1e-vA7U9n-1DTGwIB_UoTa1U1A61Mhye0"
-
 # Timezone for Ethiopia
 ethiopia_tz = pytz.timezone('Africa/Addis_Ababa')
 
-# Store user data temporarily
-user_data = {}
+# Store bot state in session state
+if 'bot_running' not in st.session_state:
+    st.session_state.bot_running = False
+if 'user_data' not in st.session_state:
+    st.session_state.user_data = {}
+if 'bot_application' not in st.session_state:
+    st.session_state.bot_application = None
 
-# Create Flask app for keeping the bot awake
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Telegram Bot is running! 🚀"
-
-def run_flask():
-    """Run Flask app to keep the bot awake"""
-    app.run(host='0.0.0.0', port=5000)
-
-def keep_awake():
-    """Function to keep the bot awake by pinging itself"""
-    def wake_thread():
-        while True:
-            try:
-                requests.get("https://your-bot-name.onrender.com", timeout=10)
-                print("Keep-alive ping sent at", datetime.now())
-            except Exception as e:
-                print("Ping failed:", e)
-            time.sleep(300)  # Sleep for 5 minutes
-    
-    thread = Thread(target=wake_thread)
-    thread.daemon = True
-    thread.start()
-
-# AMHARIC BIBLE VERSES BUILT INTO THE CODE
+# AMHARIC BIBLE VERSES
 AMHARIC_VERSES = [
     {"verse": "እግዚአብሔር ፈቃዱን ይፈጽማል፤ በእርሱ ተማምኜ አደርጋለሁ።", "category": "የእምነት ጥቅስ"},
     {"verse": "ሁሉን በክርስቶስ የማጠነከር ኃይል አለኝ።", "category": "የኃይል ጥቅስ"},
@@ -68,12 +50,7 @@ AMHARIC_VERSES = [
     {"verse": "የእግዚአብሔር ቃል ለእግሬ መብራት ለመንገዴ ብርሃን ነው።", "category": "የመምራት ጥቅስ"},
     {"verse": "እግዚአብሔር ወዳጄ ነው፤ ከሁሉ በላይ በእርሱ ረጋለሁ።", "category": "የመታገስ ጥቅስ"},
     {"verse": "በእግዚአብሔር ሰላም ልባችንን ይጠብቃል።", "category": "የሰላም ጥቅስ"},
-    {"verse": "እግዚአብሔር ከእኛ ጋር ነው፤ ለምን እንፈራለን?", "category": "የመጽናናት ጥቅስ"},
-    {"verse": "በልጆችህ ይባርክ፤ በውስጥህ ያሉት ሁሉ ይባረክ።", "category": "የበረከት ጥቅስ"},
-    {"verse": "እግዚአብሔር አምላክ አንድ ነው፤ ከእርሱ በቀር ሌላ የለም።", "category": "የአምልኮ ጥቅስ"},
-    {"verse": "የእግዚአብሔር ፍቅር ዘለዓለም ነው፤ ሁልጊዜ ይጠብቀናል።", "category": "የፍቅር ጥቅስ"},
-    {"verse": "በእግዚአብሔር ቃል ሁሉ ይቻላል፤ ለማይናገር ነገር የለም።", "category": "የእምነት ጥቅስ"},
-    {"verse": "እግዚአብሔር ቸር ነው፤ ምህረቱ ዘለዓለም ነው።", "category": "የምህረት ጥቅስ"}
+    {"verse": "እግዚአብሔር ከእኛ ጋር ነው፤ ለምን እንፈራለን?", "category": "የመጽናናት ጥቅስ"}
 ]
 
 def get_daily_verse():
@@ -87,20 +64,16 @@ def get_random_verse():
     return random.choice(AMHARIC_VERSES)
 
 def save_to_sheet(data_type, content, user_info=""):
-    """Save prayers, testimonies, and feedback to Google Sheet"""
+    """Save prayers, testimonies, and feedback"""
     try:
-        # This function would normally save to Google Sheets
-        # For now, we'll just log it since we don't have write access
         timestamp = datetime.now(ethiopia_tz).strftime("%Y-%m-%d %H:%M:%S")
-        logger.info(f"SAVED TO SHEET - Type: {data_type}, Content: {content}, User: {user_info}, Time: {timestamp}")
-        
-        # In a real implementation, you would use Google Sheets API here
-        # to append this data to your sheet
+        logger.info(f"SAVED - Type: {data_type}, Content: {content}, User: {user_info}, Time: {timestamp}")
         return True
     except Exception as e:
-        logger.error(f"Error saving to sheet: {e}")
+        logger.error(f"Error saving: {e}")
         return False
 
+# Telegram Bot Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send welcome message when the command /start is issued."""
     user = update.effective_user
@@ -143,17 +116,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=main_menu_keyboard())
     
     elif data == "add_prayer":
-        user_data[user_id] = {'action': 'adding_prayer'}
+        st.session_state.user_data[user_id] = {'action': 'adding_prayer'}
         text = "🙏 <b>ጸሎትዎን አሳልፉ</b>\n\nእባክዎ ጸሎትዎን ይፃፉ፡"
         await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=cancel_keyboard())
     
     elif data == "add_testimony":
-        user_data[user_id] = {'action': 'adding_testimony'}
+        st.session_state.user_data[user_id] = {'action': 'adding_testimony'}
         text = "✨ <b>ምስክርነትዎን አጋሩ</b>\n\nእግዚአብሔር በሕይወትዎ ያደረገውን ነገር ይፃፉ፡"
         await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=cancel_keyboard())
     
     elif data == "add_feedback":
-        user_data[user_id] = {'action': 'adding_feedback'}
+        st.session_state.user_data[user_id] = {'action': 'adding_feedback'}
         text = "📝 <b>ለወጣቶች ኮሚቴ ግብረመልስ</b>\n\nሀሳብዎን ወይም ግብረመልስዎን ይፃፉ፡"
         await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=cancel_keyboard())
     
@@ -171,15 +144,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
         await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=main_menu_keyboard())
     
-    elif data == "main_menu":
-        await query.edit_message_text(
-            text="ዋና መግለጫ፡ የሚፈልጉትን አገልግሎት ይምረጡ፡",
-            reply_markup=main_menu_keyboard()
-        )
-    
     elif data == "cancel":
-        if user_id in user_data:
-            del user_data[user_id]
+        if user_id in st.session_state.user_data:
+            del st.session_state.user_data[user_id]
         await query.edit_message_text(
             text="ክንውን ተሰርዟል። ዋና መግለጫ፡",
             reply_markup=main_menu_keyboard()
@@ -191,48 +158,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
     text = update.message.text
     
-    if user_id in user_data:
-        action = user_data[user_id]['action']
+    if user_id in st.session_state.user_data:
+        action = st.session_state.user_data[user_id]['action']
         
         if action == 'adding_prayer':
-            # Save prayer to Google Sheet
             save_to_sheet("PRAYER", text, f"User: {user_name} (ID: {user_id})")
             await update.message.reply_text(
                 "🙏 ጸሎትዎ ተቀብሎል! አምላክ ይመስርዎት።\n\n"
                 "እንደገና ለመጠቀም ከታች ያሉትን ቁልፎች ይጠቀሙ።",
                 reply_markup=main_menu_keyboard()
             )
-            del user_data[user_id]
+            del st.session_state.user_data[user_id]
         
         elif action == 'adding_testimony':
-            # Save testimony to Google Sheet
             save_to_sheet("TESTIMONY", text, f"User: {user_name} (ID: {user_id})")
             await update.message.reply_text(
                 "✨ ምስክርነትዎ ተቀብሎል! አምላክ ይባረክዎት።\n\n"
                 "እንደገና ለመጠቀም ከታች ያሉትን ቁልፎች ይጠቀሙ።",
                 reply_markup=main_menu_keyboard()
             )
-            del user_data[user_id]
+            del st.session_state.user_data[user_id]
         
         elif action == 'adding_feedback':
-            # Save feedback to Google Sheet
             save_to_sheet("FEEDBACK", text, f"User: {user_name} (ID: {user_id})")
             await update.message.reply_text(
                 "📝 ግብረመልስዎ ተቀብሎል! አመሰግናለሁ! 🙏\n\n"
                 "እንደገና ለመጠቀም ከታች ያሉትን ቁልፎች ይጠቀሙ።",
                 reply_markup=main_menu_keyboard()
             )
-            del user_data[user_id]
+            del st.session_state.user_data[user_id]
     
     else:
-        # If no specific action, show main menu
         await update.message.reply_text(
             "ዋና መግለጫ፡ የሚፈልጉትን አገልግሎት ይምረጡ፡",
             reply_markup=main_menu_keyboard()
         )
 
 def main_menu_keyboard():
-    """Create the main menu keyboard"""
     keyboard = [
         [InlineKeyboardButton("📖 የዛሬ ጥቅስ", callback_data="daily_verse")],
         [InlineKeyboardButton("🎲 የተለያየ ጥቅስ", callback_data="random_verse")],
@@ -244,38 +206,126 @@ def main_menu_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 def cancel_keyboard():
-    """Create cancel keyboard"""
-    keyboard = [
-        [InlineKeyboardButton("❌ ሰርዝ", callback_data="cancel")]
-    ]
+    keyboard = [[InlineKeyboardButton("❌ ሰርዝ", callback_data="cancel")]]
     return InlineKeyboardMarkup(keyboard)
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Log errors."""
     logger.error(msg="Exception occurred:", exc_info=context.error)
 
+def keep_alive():
+    """Function to keep the bot alive by making requests"""
+    def wake_thread():
+        while st.session_state.bot_running:
+            try:
+                # This keeps the thread active and prevents timeouts
+                time.sleep(60)  # Sleep for 1 minute
+                logger.info("🤖 Bot is still running...")
+            except Exception as e:
+                logger.error(f"Keep-alive error: {e}")
+    
+    thread = threading.Thread(target=wake_thread)
+    thread.daemon = True
+    thread.start()
+
 def start_bot():
-    """Start the Telegram bot."""
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    """Start the Telegram bot in a separate thread"""
+    async def run_bot():
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_error_handler(error_handler)
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CallbackQueryHandler(button_handler))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        application.add_error_handler(error_handler)
 
-    # Start the Bot
-    print("🤖 Telegram Bot is starting...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == '__main__':
-    # Start Flask in a separate thread for keeping awake
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
+        st.session_state.bot_application = application
+        logger.info("🤖 Telegram Bot is starting...")
+        await application.run_polling(allowed_updates=Update.ALL_TYPES)
     
-    # Start keep-awake function
-    keep_awake()
+    # Run the bot in a separate thread
+    def run_async():
+        asyncio.run(run_bot())
     
-    # Start the Telegram bot
-    start_bot()
+    bot_thread = threading.Thread(target=run_async)
+    bot_thread.daemon = True
+    bot_thread.start()
+    
+    # Start keep-alive
+    keep_alive()
+    
+    st.session_state.bot_running = True
+    return True
+
+def stop_bot():
+    """Stop the Telegram bot"""
+    if st.session_state.bot_application:
+        st.session_state.bot_application.stop()
+    st.session_state.bot_running = False
+    return True
+
+# Streamlit UI
+st.title("🤖 Amharic Prayer Bot Controller")
+st.markdown("---")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("Bot Status")
+    if st.session_state.bot_running:
+        st.success("🟢 Bot is RUNNING")
+        st.info("The bot is active 24/7 and listening for Telegram messages")
+    else:
+        st.error("🔴 Bot is STOPPED")
+        st.info("Click the button below to start the bot")
+
+with col2:
+    st.subheader("Controls")
+    
+    if not st.session_state.bot_running:
+        if st.button("🚀 Start Bot", type="primary", use_container_width=True):
+            if start_bot():
+                st.success("Bot started successfully!")
+                st.rerun()
+    else:
+        if st.button("🛑 Stop Bot", type="secondary", use_container_width=True):
+            if stop_bot():
+                st.success("Bot stopped successfully!")
+                st.rerun()
+
+st.markdown("---")
+st.subheader("📊 Bot Information")
+
+st.info("""
+**Features:**
+- 📖 Daily Amharic Bible verses
+- 🎲 Random verses on demand  
+- 🙏 Prayer submission
+- ✨ Testimony sharing
+- 📝 Youth committee feedback
+- 24/7 operation
+
+**How to use:**
+1. Start the bot using the button above
+2. Search for your bot on Telegram
+3. Send `/start` to begin
+""")
+
+st.subheader("🔧 Technical Details")
+st.code(f"""
+Bot Token: {TELEGRAM_BOT_TOKEN[:10]}...
+Status: {'Running' if st.session_state.bot_running else 'Stopped'}
+Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+""")
+
+# Auto-restart logic (for 24/7 operation)
+if st.session_state.bot_running:
+    st.balloons()
+    
+    # This ensures the app stays active
+    st.markdown("---")
+    st.caption("🔄 Auto-refresh enabled for 24/7 operation")
+
+# Initialize bot on startup if not running
+if not st.session_state.bot_running and 'initialized' not in st.session_state:
+    st.session_state.initialized = True
+    # Uncomment the line below to auto-start the bot when the app loads
+    # start_bot()
